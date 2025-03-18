@@ -1,9 +1,6 @@
-# pterosocket.py
 import asyncio
 import json
-import websockets
-import aiohttp
-from aiohttp import ClientSession
+from aiohttp import ClientSession, ClientWebSocketResponse
 from node_events import EventEmitter
 
 class PteroSocket(EventEmitter):
@@ -12,9 +9,9 @@ class PteroSocket(EventEmitter):
         self.origin = origin
         self.api_key = api_key
         self.server_no = server_no
-        self.ws = None
+        self.ws: ClientWebSocketResponse = None  # Aiohttp WebSocket client
         if auto_connect:
-            asyncio.run(self.connect())
+            asyncio.create_task(self.connect())
 
     async def api_request(self, service, body='', method='GET'):
         async with ClientSession() as session:
@@ -28,6 +25,7 @@ class PteroSocket(EventEmitter):
 
     async def get_new_login(self):
         response = await self.api_request('websocket')
+        print("API Response:", response)  # Debugging output
         if "data" in response:
             return response['data']
 
@@ -42,17 +40,26 @@ class PteroSocket(EventEmitter):
             await self.write({"event": "auth", "args": [token]})
 
     async def read_packet(self, packet):
-        data = json.loads(packet)
-        event = data['event']
-        args = data.get('args', [])
-        if event == 'stats':
-            if args[0].startswith("{"):
-                self.emit('stats', json.loads(args[0]))
-        elif event == 'token expiring':
-            await self.auth_login()
-            self.emit(event.replace(" ", "_"))
+        # Check if the message is a text message
+        if packet.type == aiohttp.WSMsgType.TEXT:
+            try:
+                data = json.loads(packet.data)  # Extract the data and load it as JSON
+                event = data['event']
+                args = data.get('args', [])
+
+                if event == 'stats':
+                    if args[0].startswith("{"):
+                        self.emit('stats', json.loads(args[0]))
+                elif event == 'token expiring':
+                    await self.auth_login()
+                    self.emit(event.replace(" ", "_"))
+                else:
+                    self.emit(event.replace(" ", "_"), args[0] if args else None)
+            except json.JSONDecodeError as e:
+                print(f"Failed to decode JSON: {e}")
         else:
-            self.emit(event.replace(" ", "_"), args[0] if args else None)
+            # Handle other types of WebSocket messages if needed
+            print(f"Received non-text message: {packet.type}")
 
     async def connect(self):
         login = await self.get_new_login()
@@ -63,23 +70,25 @@ class PteroSocket(EventEmitter):
         token = login['token']
         socket = login['socket']
         
-        self.ws = await websockets.connect(socket, origin=self.origin)
-        await self.auth_login(token)
-        self.emit('start')
+        # Using aiohttp for the WebSocket connection
+        async with ClientSession() as session:
+            async with session.ws_connect(socket, origin=self.origin) as ws:
+                self.ws = ws
+                await self.auth_login(token)
+                self.emit('start')
 
-        async def listen():
-            async for data in self.ws:
-                await self.read_packet(data)
-
-        asyncio.create_task(listen())
+                async for data in self.ws:
+                    await self.read_packet(data)
 
     async def close(self):
-        await self.ws.close()
-        self.ws = None
-        self.emit("close", "Connection closed by user")
+        if self.ws:
+            await self.ws.close()
+            self.ws = None
+            self.emit("close", "Connection closed by user")
 
     async def write(self, packet):
-        await self.ws.send(json.dumps(packet))
+        if self.ws:
+            await self.ws.send_str(json.dumps(packet))
 
     async def write_command(self, command_text):
         await self.write({"event": "send command", "args": [command_text]})
