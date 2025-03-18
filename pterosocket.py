@@ -1,4 +1,5 @@
 import asyncio
+import aiohttp
 import json
 from aiohttp import ClientSession, ClientWebSocketResponse
 from node_events import EventEmitter
@@ -25,7 +26,7 @@ class PteroSocket(EventEmitter):
 
     async def get_new_login(self):
         response = await self.api_request('websocket')
-        print("API Response:", response)  # Debugging output
+        # print("API Response:", response)  # Debugging output
         if "data" in response:
             return response['data']
 
